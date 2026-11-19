@@ -24,6 +24,9 @@ LEGEND_HIDDEN = "Legend hidden for more than 24 runs."
 MAX_PANELS = 8
 
 
+FOLLOW_OFF_NOTE = "Follow main view off — range set by hand."
+
+
 class BinnedWindow(tk.Toplevel):
     WORKER_MIN = 1_000_000      # runs with at least this many samples are binned on a worker thread
 
@@ -49,11 +52,17 @@ class BinnedWindow(tk.Toplevel):
         self._messages = {}
         self._refit_pending = True
         self.panel_axes = []
+        self._follow_note = ""
         self.title("Binned")
         self.geometry("1150x820")
         self.configure(background=CARD)
         self.protocol("WM_DELETE_WINDOW", self.close)
         self._build()
+        rng = self._clip_view(*(app.main_view_range() or (None, None)))
+        if rng is not None:                       # following from the start: open on the main view
+            self.t_from, self.t_to = rng
+            self.from_var.set("" if rng[0] is None else f"{rng[0]:g}")
+            self.to_var.set("" if rng[1] is None else f"{rng[1]:g}")
         self.refresh(refit=True)
         self._after_id = self.after(50, self._poll)
 
@@ -79,6 +88,11 @@ class BinnedWindow(tk.Toplevel):
         self.raw_var = tk.BooleanVar(master=self, value=True)
         ttk.Checkbutton(top, text="Raw panels", style="Card.TCheckbutton", variable=self.raw_var,
                         command=lambda: self.set_raw_panels(self.raw_var.get())).pack(side=tk.LEFT, padx=(4, 0))
+        self.follow_var = tk.BooleanVar(master=self, value=True)
+        ttk.Checkbutton(top, text="Follow main view", style="Card.TCheckbutton", variable=self.follow_var,
+                        command=lambda: self.set_follow(self.follow_var.get())).pack(side=tk.LEFT, padx=(14, 0))
+        self.follow_lbl = ttk.Label(top, text="", style="Muted.Card.TLabel")
+        self.follow_lbl.pack(side=tk.LEFT, padx=(8, 0))
         ttk.Button(top, text="Export\u2026", command=self._on_export).pack(side=tk.RIGHT)
         self.controls = top
         self.status_lbl = ttk.Label(self, text="", style="Muted.Card.TLabel", padding=(12, 0))
@@ -98,8 +112,43 @@ class BinnedWindow(tk.Toplevel):
         self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=8, pady=(4, 0))
 
     # ---------- following the main view ----------
+    def _clip_view(self, lo, hi):
+        """The view range as (From, To) for the shown runs, or None (no runs / no overlap). A side
+        that reaches the runs' start or end stays open (None), as an empty From/To box does, so the
+        last, shorter bin is kept."""
+        runs = [f for f in self.app.files if f.get("show")]
+        if lo is None or not runs:
+            return None
+        start = min(f["data"].t_start for f in runs)
+        end = max(f["data"].t_end for f in runs)
+        if max(lo, start) >= min(hi, end):
+            return None
+        return (None if lo <= start else float(lo)), (None if hi >= end else float(hi))
+
     def follow_view(self, lo, hi):
-        """The main chart's visible range changed (filled in by the follow feature)."""
+        """The main chart's visible range changed: while following, From/To take it (clipped to the
+        shown runs). Nothing is re-binned when the range is unchanged."""
+        if self._closed or not self.follow_var.get():
+            return
+        rng = self._clip_view(lo, hi)
+        if rng is None or rng == (self.t_from, self.t_to):
+            return
+        self.set_range(*("" if v is None else repr(v) for v in rng), by_hand=False)
+
+    def set_follow(self, on):
+        self.follow_var.set(bool(on))
+        self._set_follow_note("")
+        if on:
+            rng = self.app.main_view_range()
+            if rng is not None:
+                self.follow_view(*rng)
+
+    def _set_follow_note(self, text):
+        self._follow_note = text
+        self.follow_lbl.config(text=text)
+
+    def follow_note(self):
+        return self._follow_note
 
     # ---------- inputs ----------
     def _status(self, key, text):
@@ -139,7 +188,7 @@ class BinnedWindow(tk.Toplevel):
         self.refresh(refit=True)
         return True
 
-    def set_range(self, from_text, to_text):
+    def set_range(self, from_text, to_text, by_hand=True):
         def num(s):
             s = str(s).strip()
             if not s:
@@ -157,6 +206,9 @@ class BinnedWindow(tk.Toplevel):
             self.from_entry.config(bg=BAD_BG)
             return False
         self.from_entry.config(bg=OK_BG)
+        if by_hand and self.follow_var.get():     # a range set by hand ends following
+            self.follow_var.set(False)
+            self._set_follow_note(FOLLOW_OFF_NOTE)
         self.t_from, self.t_to = a, b
         self.from_var.set("" if a is None else f"{a:g}")
         self.to_var.set("" if b is None else f"{b:g}")

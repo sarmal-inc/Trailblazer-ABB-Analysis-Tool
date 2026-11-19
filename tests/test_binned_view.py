@@ -393,5 +393,92 @@ class ReviewFixTest(BinBase):
         self.assertGreaterEqual(w.ax.get_xlim()[1], last)
 
 
+
+class FollowTest(BinBase):
+    NOTE = "Follow main view off — range set by hand."
+
+    def pump(self, seconds=0.6):
+        end = time.monotonic() + seconds
+        while time.monotonic() < end:
+            self.app.update()
+            time.sleep(0.01)
+
+    def zoom(self, w, lo, hi):
+        self.app.tools.zoom_x(lo, hi)
+        self.pump()
+        self.wait(lambda: not w.busy)
+
+    def test_follow_sets_from_to(self):
+        w = self.open()
+        self.assertTrue(w.follow_var.get())
+        self.zoom(w, 1, 3)
+        self.assertEqual((w.from_var.get(), w.to_var.get()), ("1", "3"))
+        for ln in w.overlay_lines():
+            x = np.asarray(ln.get_xdata())
+            self.assertTrue(np.all((x >= 1) & (x <= 3)), x)
+        self.assertEqual(self.errors, [])
+
+    def test_follow_clipped(self):
+        w = self.open()
+        self.zoom(w, -1, 2)
+        self.assertIsNone(w.t_from)                  # reaches the runs' start: open, like an empty box
+        self.assertEqual(w.from_var.get(), "")
+        self.assertEqual(w.t_to, 2)
+
+    def test_full_view_keeps_last_partial_bin(self):
+        w = self.open()
+        self.assertTrue(w.set_bin("0.3"))
+        w.set_follow(True)
+        self.app.tools.reset()
+        self.pump()
+        self.wait(lambda: not w.busy)
+        self.assertEqual((w.t_from, w.t_to), (None, None))
+        self.assertGreater(max(float(np.max(l.get_xdata())) for l in w.overlay_lines()), 3.9999)
+
+    def test_typed_range_turns_follow_off(self):
+        w = self.open()
+        self.assertTrue(w.set_range("0.5", "1"))
+        self.assertFalse(w.follow_var.get())
+        self.assertEqual(w.follow_note(), self.NOTE)
+        self.zoom(w, 2, 3)
+        self.assertEqual((w.t_from, w.t_to), (0.5, 1.0))
+
+    def test_span_turns_follow_off(self):
+        w = self.open()
+        w._on_span(1, 2)
+        self.assertFalse(w.follow_var.get())
+        self.assertEqual(w.follow_note(), self.NOTE)
+
+    def test_overlay_zoom_is_local(self):
+        w = self.open()
+        self.zoom(w, 0.5, 3.5)
+        main = self.app.ax.get_xlim()
+        before = (w.t_from, w.t_to)
+        w.tools.zoom_x(1, 1.5)
+        self.pump()
+        self.assertEqual((w.t_from, w.t_to), before)
+        self.assertTrue(w.follow_var.get())
+        self.assertEqual(self.app.ax.get_xlim(), main)
+
+    def test_same_range_no_refresh(self):
+        w = self.open()
+        self.zoom(w, 1, 2)
+        with mock.patch.object(w, "set_range", wraps=w.set_range) as sr:
+            self.app.files[0]["alias"] = "renamed"
+            self.app.draw()
+            self.pump()
+            self.assertEqual(sr.call_count, 0)
+
+    def test_retick_snaps_back(self):
+        w = self.open()
+        self.zoom(w, 1, 3)
+        w.set_range("0.5", "1")
+        w.set_follow(True)
+        self.wait(lambda: not w.busy)
+        self.assertTrue(w.follow_var.get())
+        self.assertEqual(w.follow_note(), "")
+        self.assertEqual((w.t_from, w.t_to), (1.0, 3.0))
+
+
 if __name__ == "__main__":
     unittest.main()
