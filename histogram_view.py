@@ -144,6 +144,10 @@ class HistogramWindow(tk.Toplevel):
         self.tree.bind("<Double-1>", self._on_tree_double)
         self.tree.bind("<Button-3>", self._on_tree_menu)
 
+    # ---------- following the main view ----------
+    def follow_view(self, lo, hi):
+        """The main chart's visible range changed (filled in by the follow feature)."""
+
     # ---------- rows ----------
     def _plotted(self):
         return sum(r.plot for r in self.rows)

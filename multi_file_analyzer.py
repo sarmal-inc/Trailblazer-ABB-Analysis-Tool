@@ -541,6 +541,7 @@ def is_stopped(f):
 
 
 SORT_MODES = ["Run # ↑", "Run # ↓", "Load order"]
+FOLLOW_DELAY_MS = 400     # Histogram/Binned follow the main view this long after zooming stops
 _LAST_NUMBER_RE = re.compile(r"(\d+)(?!.*\d)")
 
 
@@ -920,6 +921,7 @@ class App(TkBase):
         self._auto_ctx = None    # cached (several experiments, several folders) for Auto labels
         self._icons = {}         # (colour, shown) -> PhotoImage for the file list
         self._xlim_job = None
+        self._follow_job = None      # pending push of the main view range to Histogram/Binned
         self._loading = False
         self._load_seq = 0       # counts every trace ever added, for "Load order" sorting
         self._q = queue.Queue()
@@ -1678,6 +1680,9 @@ class App(TkBase):
             self.status.config(text="Noise analysis running — press Cancel first.")
             return
         self.files.clear()
+        if self._follow_job is not None:
+            self.after_cancel(self._follow_job)
+            self._follow_job = None
         self._close_stale_noise_views()
         if self._histogram is not None:
             self._histogram.close()
@@ -2462,6 +2467,7 @@ class App(TkBase):
                               else "Add one or more CSV or Excel files to see the data.")
             if self._binned is not None:
                 self._binned.refresh()
+            self._schedule_follow()
             return
         ax = self.ax
         keep = bool(self._lines) and not reset_view
@@ -2524,6 +2530,29 @@ class App(TkBase):
         self.canvas.draw_idle()
         if self._binned is not None:
             self._binned.refresh()
+        self._schedule_follow()
+
+    def main_view_range(self):
+        """The main chart's visible time range, or None when no run is drawn."""
+        if not HAS_MPL or not self._lines:
+            return None
+        x0, x1 = self.ax.get_xlim()
+        return float(x0), float(x1)
+
+    def _schedule_follow(self):
+        if self._follow_job is not None:
+            self.after_cancel(self._follow_job)
+        self._follow_job = self.after(FOLLOW_DELAY_MS, self._push_follow)
+
+    def _push_follow(self):
+        """Tell the open Histogram/Binned windows the main chart's visible range."""
+        self._follow_job = None
+        rng = self.main_view_range()
+        if rng is None:
+            return
+        for w in (self._histogram, self._binned):
+            if w is not None and not getattr(w, "_closed", False):
+                w.follow_view(*rng)
 
     def reset_zoom(self):
         if self.tools:
@@ -2579,6 +2608,7 @@ class App(TkBase):
             self._apply_style(line, raw, id(f) in sel)
         self._update_view_label()
         self.canvas.draw_idle()
+        self._schedule_follow()
 
     def _draw_budget(self, n_traces):
         return draw_budget(n_traces, self.canvas.get_tk_widget().winfo_width())

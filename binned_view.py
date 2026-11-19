@@ -97,6 +97,10 @@ class BinnedWindow(tk.Toplevel):
         self.tools.readout_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=12)
         self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=8, pady=(4, 0))
 
+    # ---------- following the main view ----------
+    def follow_view(self, lo, hi):
+        """The main chart's visible range changed (filled in by the follow feature)."""
+
     # ---------- inputs ----------
     def _status(self, key, text):
         if text:
