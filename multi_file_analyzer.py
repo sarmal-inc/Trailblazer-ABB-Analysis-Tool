@@ -64,6 +64,15 @@ Chart tools:
     (Home) to the full range, and Save image... writes the plot to a PNG file. The keys
     W, X, Y, C, BackSpace and Home work only after the chart has focus: click it first.
 
+Smoothing:
+    Smooth... (toolbar) or View > Smooth selected trace... opens a tab next to Statistics and
+    Noise for the selected trace (or the first shown one). Pick a window size in points and a
+    start x (defaults to the window start; click the chart to set it). Points from start x on are
+    replaced by a pandas rolling mean. Export CSV... saves raw and smoothed columns; Send to main
+    chart adds the result as a new trace "<name> (smoothed N pts)" (held in memory, not cached),
+    which then works with Calculate, Analyze noise and exports like any other trace.
+    smoothing_function.py must sit next to this file.
+
 Requirements:
     pip install pandas matplotlib openpyxl numpy
     pip install tkinterdnd2      (optional: drag files or folders onto the window)
@@ -75,7 +84,6 @@ Run:
 
 import dataclasses
 import math
-import csv
 import os
 import queue
 import re
@@ -88,11 +96,10 @@ import numpy as np
 import pandas as pd
 
 import noise
-import run_info
-from binned_view import BinnedWindow
-from histogram_view import HistogramWindow
 from settings import default_settings_path, load_settings, parse_settings, save_settings
-from trace_store import cache_info, clear_cache, default_cache_dir, is_cached, is_cloud_only, open_traces
+from trace_store import (TraceData, cache_info, clear_cache, default_cache_dir, is_cached,
+                         is_cloud_only, open_traces)
+from smoothing_function import open_smoothing_tab
 
 try:
     import matplotlib
@@ -150,22 +157,6 @@ def _parse_comment(line, dest):
                 dest["channel"] = r.group(3)
 
 
-def _unquote_line(s):
-    """A line as written before Excel re-saved the file: one pair of surrounding quotes removed
-    (with "" inside un-doubled), and the extra columns dropped when they are all empty or
-    spreadsheet error values such as #DIV/0! (so a real comment containing a comma is kept)."""
-    s = s.strip()
-    if '"' not in s and "," not in s:
-        return s
-    try:
-        fields = next(csv.reader([s]))
-    except (StopIteration, csv.Error):
-        return s
-    if s.startswith('"') or all(not f.strip() or f.strip().startswith("#") for f in fields[1:]):
-        return fields[0].strip() if fields else ""
-    return s
-
-
 def _footer_lines(path, nbytes=8192):
     """Comment lines at the very end of the file, read without loading the whole file."""
     size = os.path.getsize(path)
@@ -174,26 +165,12 @@ def _footer_lines(path, nbytes=8192):
         tail = fh.read().decode("utf-8", errors="replace").splitlines()
     out = []
     for ln in reversed(tail):
-        ln = _unquote_line(ln)
-        if not ln:
+        if not ln.strip():
             continue
-        if not ln.startswith("#"):
+        if not ln.lstrip().startswith("#"):
             break
         out.append(ln)
     return list(reversed(out))
-
-
-def _read_text_columns(path, skip):
-    """First two columns as numbers, dropping rows where either is not a number; None if nothing
-    numeric is left. Slow path for files whose rows aren't all clean numbers."""
-    try:
-        raw = pd.read_csv(path, skiprows=skip, header=0, usecols=[0, 1], dtype=str,
-                          skip_blank_lines=True, encoding="utf-8", encoding_errors="replace",
-                          engine="c", on_bad_lines="skip")
-    except Exception:
-        return None
-    num = raw.apply(pd.to_numeric, errors="coerce").dropna()
-    return num.astype("float64") if len(num) else None
 
 
 def parse_instrument_csv(path):
@@ -210,7 +187,7 @@ def parse_instrument_csv(path):
         for i, ln in enumerate(fh):
             if i > 200:
                 break
-            s = _unquote_line(ln)
+            s = ln.strip()
             if not s:
                 continue
             if s.startswith("#"):
@@ -226,9 +203,7 @@ def parse_instrument_csv(path):
                          skip_blank_lines=True, encoding="utf-8", encoding_errors="replace",
                          engine="c", dtype="float64")
     except ValueError as e:
-        df = _read_text_columns(path, skip)       # e.g. re-saved by Excel: text cells, quoted lines
-        if df is None:
-            raise ReadError(f"The data rows aren't all numbers ({e}).")
+        raise ReadError(f"The data rows aren't all numbers ({e}).")
     except Exception as e:
         raise ReadError(f"Couldn't read the data rows: {e}")
     df = df.dropna()
@@ -601,7 +576,7 @@ PRETTY = {
     "data_file": "Data file", "duration_s": "Duration (s)", "recording_delay_s": "Recording delay (s)",
     "record_while_step": "Record while step", "stopped_early": "Stopped early",
     "samples": "Samples", "max_mv": "Max (mV)", "min_mv": "Min (mV)", "mean_mv": "Mean (mV)",
-    "std_mv": "Std (mV)", "timestamp": "Timestamp",
+    "std_mv": "Std (mV)", "timestamp": "Timestamp", "smoothing": "Smoothing",
 }
 
 # White tick inside the show/hide box (pixel, 2 px tall)
@@ -630,8 +605,6 @@ class NoiseView(tk.Toplevel):
         self.freqs = self.psd = None
         self.df = None
         self.peaks = []
-        self.seen = []          # per peak: slices it was seen in
-        self.n_slices = None
         self.spikes = None
         meta = app.noise_meta
         if meta is not None:
@@ -727,7 +700,7 @@ class NoiseView(tk.Toplevel):
                 elif trace.dt is None:
                     note = noise.NOTE_NOT_UNIFORM
                 elif i1 - i0 >= 2:
-                    spec = noise.trace_spectrum(trace, i0, i1, slices=True)
+                    spec = noise.trace_spectrum(trace, i0, i1)
                 self._q.put(("ok", (spikes, spec, note)))
             except Exception as e:
                 self._q.put(("error", e))
@@ -751,11 +724,8 @@ class NoiseView(tk.Toplevel):
         if self.spikes is None:                  # a result for an older k never replaces a newer one
             self.spikes = spikes
         if spec is not None:
-            self.freqs, self.psd, self.df, sl = spec
-            self.peaks = noise.top_peaks(self.freqs, self.psd, self.df, n=noise.N_PEAKS,
-                                         f_min=self.f_min)
-            self.seen = [noise.seen_count(sl, self.df, hz) for hz, _ in self.peaks]
-            self.n_slices = int(sl.shape[0])
+            self.freqs, self.psd, self.df = spec
+            self.peaks = noise.top_peaks(self.freqs, self.psd, self.df, f_min=self.f_min)
         self.note_lbl.config(text=note)
         self.status_lbl.config(text=f"Window {self.t0:g} – {self.t1:g} s")
         self._draw_spectrum()
@@ -775,7 +745,7 @@ class NoiseView(tk.Toplevel):
             for hz, mv in self.peaks:
                 ax.plot([hz], [amp[min(int(round(hz / self.df)), len(amp) - 1)]], marker="v",
                         ls="none", color="#b42318", ms=7)
-            self.res_lbl.config(text=f"Resolution {self.df:.1f} Hz · Slice {1 / self.df:.2f} s")
+            self.res_lbl.config(text=f"Resolution {self.df:.1f} Hz")
             self._peaks_lbl.config(text=self.peak_text())
         else:
             self.res_lbl.config(text="")
@@ -799,8 +769,8 @@ class NoiseView(tk.Toplevel):
             pass
 
     def peak_text(self):
-        return "\n".join(f"#{i}  {hz:.1f} Hz  {mv:.3f} mV RMS  seen {fmt(s)}/{self.n_slices} s"
-                         for i, ((hz, mv), s) in enumerate(zip(self.peaks, self.seen), 1))
+        return "\n".join(f"#{i}  {hz:.1f} Hz  {mv:.3f} mV RMS"
+                         for i, (hz, mv) in enumerate(self.peaks, 1))
 
     def _fill_spikes(self):
         tree = self.spike_tree
@@ -905,7 +875,7 @@ class App(TkBase):
     RES_HEAD = ("Trace", "Range (min to max, dot = mean)", "Points", "Mean", "Std", "Max", "Min",
                 "Time of max (s)")
 
-    def __init__(self, settings_path=None, run_info_path=None):
+    def __init__(self, settings_path=None):
         super().__init__()
         self.title("Multi-File Analyzer")
         self.geometry("1400x880")
@@ -927,9 +897,6 @@ class App(TkBase):
         self._memory_noted = False   # the "cache folder unwritable" note is shown once per session
         self.settings_path = settings_path or default_settings_path()
         self.settings = load_settings(self.settings_path)
-        self.run_info_path = run_info_path or run_info.default_path()
-        self._histogram = None       # the open HistogramWindow, if any
-        self._binned = None          # the open BinnedWindow, if any
         self.noise_rows = []         # (trace dict, NoiseResult | Exception), in the order analysed
         self.noise_meta = None       # (t0, t1, k, f_min, watch, resolution) of the last run
         self.noise_outdated = False
@@ -1125,8 +1092,8 @@ class App(TkBase):
         m.add_separator()
         m.add_command(label="Noise view…", command=self.open_selected_noise_view)
         m.add_command(label="Noise settings…", command=self.show_noise_settings)
-        m.add_command(label="Histogram…", command=self.open_histogram)
-        m.add_command(label="Binned…", command=self.open_binned)
+        m.add_separator()
+        m.add_command(label="Smooth selected trace…", command=self.open_smoothing)
         bar.add_cascade(label="View", menu=m)
 
         m = tk.Menu(bar, tearoff=False)
@@ -1166,10 +1133,7 @@ class App(TkBase):
         self.calc_btn.pack(side=tk.LEFT, padx=8)
         self.noise_btn = ttk.Button(bar, text="Analyze noise", command=self.analyze_noise)
         self.noise_btn.pack(side=tk.LEFT)
-        self.hist_btn = ttk.Button(bar, text="Histogram\u2026", command=self.open_histogram)
-        self.hist_btn.pack(side=tk.LEFT, padx=(8, 0))
-        self.bin_btn = ttk.Button(bar, text="Binned\u2026", command=self.open_binned)
-        self.bin_btn.pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Button(bar, text="Smooth…", command=self.open_smoothing).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Checkbutton(bar, text="Shown files only", style="Card.TCheckbutton",
                         variable=self.visible_only, command=self._recalc_if_done).pack(side=tk.RIGHT)
         ttk.Checkbutton(bar, text="Sample std (n−1)", style="Card.TCheckbutton",
@@ -1665,8 +1629,6 @@ class App(TkBase):
         self._auto_ctx = None
         self.noise_rows = [r for r in self.noise_rows if any(r[0] is f for f in self.files)]
         self._close_stale_noise_views()
-        if self._histogram is not None:
-            self._histogram.drop_missing()
         self.ftree.selection_set(())
         self.refresh_files()
         self.show_info()
@@ -1679,10 +1641,6 @@ class App(TkBase):
             return
         self.files.clear()
         self._close_stale_noise_views()
-        if self._histogram is not None:
-            self._histogram.close()
-        if self._binned is not None:
-            self._binned.close()
         self.noise_rows = []
         self.noise_meta = None
         self.noise_outdated = False
@@ -2022,9 +1980,9 @@ class App(TkBase):
     def _noise_columns(self):
         watch = self.noise_meta[4] if self.noise_meta else ()
         cols = ["Trace", "Baseline (mV)", "Noise σ (mV)", "Threshold (mV)", "Spikes", "Rate (/s)",
-                "Median spacing (s)", "Spacing rate (Hz)", "Slices"]
-        for i in range(1, noise.N_PEAKS + 1):
-            cols += [f"Peak {i} (Hz)", f"Peak {i} (mV RMS)", f"Peak {i} seen"]
+                "Median spacing (s)", "Spacing rate (Hz)"]
+        for i in (1, 2, 3):
+            cols += [f"Peak {i} (Hz)", f"Peak {i} (mV RMS)"]
         return cols + [f"{f:.10g} Hz (mV RMS)" for f in watch]
 
     def _noise_cells(self):
@@ -2043,13 +2001,10 @@ class App(TkBase):
             elif r.note == noise.NOTE_EMPTY:
                 cells = ["–"] * n_cells
             else:
-                n = noise.N_PEAKS
-                peaks = list(r.peaks[:n]) + [(None, None)] * (n - len(r.peaks[:n]))
-                seen = list(r.seen[:n]) + [None] * (n - len(r.seen[:n]))
-                cells = [r.baseline, r.sigma, r.threshold, r.n_spikes, r.rate, r.median_spacing,
-                         r.spacing_hz, r.n_slices]
-                for (hz, mv), s in zip(peaks, seen):
-                    cells += [hz, mv, s]
+                peaks = list(r.peaks[:3]) + [(None, None)] * (3 - len(r.peaks[:3]))
+                cells = [r.baseline, r.sigma, r.threshold, r.n_spikes, r.rate, r.median_spacing, r.spacing_hz]
+                for hz, mv in peaks:
+                    cells += [hz, mv]
                 cells += [r.watch.get(float(w)) for w in watch]
             label = self._label(f)
             run_k = self.noise_meta[2] if self.noise_meta else None
@@ -2060,11 +2015,7 @@ class App(TkBase):
 
     def noise_table(self, for_export=False):
         """The Noise tab as a DataFrame, never re-analysing; for_export adds the settings used."""
-        cells, cols = self._noise_cells(), self._noise_columns()
-        df = pd.DataFrame(cells, columns=cols)
-        for i, c in enumerate(cols):     # counts stay whole numbers (a None would make them 14.0)
-            if c == "Slices" or c.endswith(" seen"):
-                df[c] = pd.Series([row[i] for row in cells], index=df.index, dtype=object)
+        df = pd.DataFrame(self._noise_cells(), columns=self._noise_columns())
         if for_export and self.noise_meta:
             t0, t1, k, f_min, _, res = self.noise_meta
             df["Window start (s)"] = t0
@@ -2075,8 +2026,6 @@ class App(TkBase):
             df["k"] = ks
             df["f_min (Hz)"] = f_min
             df["Resolution (Hz)"] = res
-            df["Slice (s)"] = 1 / res if res else None
-            df["Seen rule"] = noise.SEEN_RULE
         return df
 
     def _render_noise(self):
@@ -2130,26 +2079,6 @@ class App(TkBase):
             messagebox.showerror("Export failed", str(e))
 
     # ---------- noise view ----------
-    def open_histogram(self):
-        """Open the Histogram window (or raise the open one)."""
-        w = self._histogram
-        if w is not None and w.winfo_exists():
-            w.deiconify()
-            w.lift()
-            return w
-        self._histogram = HistogramWindow(self, run_number=run_number, fmt=fmt)
-        return self._histogram
-
-    def open_binned(self):
-        """Open the Binned window (or raise the open one)."""
-        w = self._binned
-        if w is not None and w.winfo_exists():
-            w.deiconify()
-            w.lift()
-            return w
-        self._binned = BinnedWindow(self)
-        return self._binned
-
     def open_noise_view(self, trace):
         """The noise view of one trace; an already open one is raised instead of duplicated."""
         if not HAS_MPL:
@@ -2169,6 +2098,64 @@ class App(TkBase):
             messagebox.showinfo("Noise view", "Add a trace first.")
             return
         self.open_noise_view(f)
+
+    # ---------- smoothing ----------
+    def open_smoothing(self, f=None):
+        """Open a rolling-average tab (smoothing_function.py) for one trace in the results notebook.
+
+        Uses the trace selected in the file list, else the first shown one. Start x defaults to
+        the start of the current window. "Send to main chart" adds the result as a new trace."""
+        if f is None:
+            sel = self._selected_files()
+            f = sel[0] if sel else next((x for x in self.files if x["show"]), None)
+        if f is None:
+            messagebox.showinfo("Smoothing", "Add a trace first.")
+            return None
+        d = f["data"]
+        rng = self._get_range(quiet=True)
+        self.config(cursor="watch"); self.update_idletasks()
+        try:
+            t = np.array(d.times(0, d.n), dtype=float)
+            mv = np.array(d.values(0, d.n), dtype=float)
+            return open_smoothing_tab(
+                self.results_nb, t, mv, name=self._label(f),
+                x_label=f.get("t_label", "Time (s)"), y_label=f.get("v_label", "Signal (mV)"),
+                start_x=rng[0] if rng else None,
+                on_apply=lambda x, s, p: self._add_smoothed_trace(f, x, np.where(np.isnan(s), mv, s), p))
+        finally:
+            self.config(cursor="")
+
+    def _add_smoothed_trace(self, src, t, mv, params):
+        """Add a smoothed copy of src as a new in-memory trace (points before start x are raw)."""
+        if self._loading or self._noise_running:
+            self.status.config(text="Wait for loading or noise analysis to finish, then send it again.")
+            return None
+        window, start_x = params["window"], params.get("start_x")
+        desc = f"{window}-point {'centered' if params.get('center', True) else 'trailing'} rolling average"
+        if start_x is not None:
+            desc += f" from {start_x:g} s"
+        self.config(cursor="watch"); self.update_idletasks()
+        try:
+            data = TraceData.from_arrays(t, mv)
+        finally:
+            self.config(cursor="")
+        fields = {k: v for k, v in src.items()
+                  if k not in ("data", "n", "show", "color", "load_idx", "alias")}
+        fields["meta"] = dict(src["meta"], smoothing=desc)
+        new = dict(fields, data=data, n=data.n, show=True, color=None, load_idx=self._load_seq,
+                   alias=f"{src.get('alias') or src['name']} (smoothed {window} pts)")
+        self._load_seq += 1
+        self.files.append(new)
+        new["color"] = self._next_color()
+        self._auto_ctx = None
+        self._mark_noise_outdated()
+        self.files[:] = sorted_files(self.files, self.sort_var.get())
+        self.refresh_files()
+        self._select_file(new)
+        self.draw()
+        self._recalc_if_done(redraw=False)
+        self.status.config(text=f"Added {new['alias']}: {desc}.")
+        return new
 
     def _on_noise_double(self, event):
         row = self.ntree.identify_row(event.y)
@@ -2460,8 +2447,6 @@ class App(TkBase):
         if not shown:
             self._empty_chart("Tick the box next to a trace to see its data." if self.files
                               else "Add one or more CSV or Excel files to see the data.")
-            if self._binned is not None:
-                self._binned.refresh()
             return
         ax = self.ax
         keep = bool(self._lines) and not reset_view
@@ -2522,8 +2507,6 @@ class App(TkBase):
         self.tools.attach()                  # ax.clear() removed the drag selector
         self._update_view_label()
         self.canvas.draw_idle()
-        if self._binned is not None:
-            self._binned.refresh()
 
     def reset_zoom(self):
         if self.tools:
