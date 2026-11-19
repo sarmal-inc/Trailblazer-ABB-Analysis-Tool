@@ -26,6 +26,7 @@ OK_BG = "#ffffff"
 GRAB_PX = 6
 DASH = "–"
 NO_SAMPLES = "No samples in the window"
+FOLLOW_OFF_NOTE = "Follow main view off — range set by hand."
 ROLE_TEXT = {"negative": "Negative", "positive": "Positive", "none": "— (not compared)"}
 COLUMNS = ["Plot", "Run", "Sample", "Gain (mV)", "From (s)", "To (s)", "Baseline (mV)", "Spikes",
            "Rate (/s)", "±", "Median peak (mV)", "Max peak (mV)", "× negative",
@@ -80,6 +81,7 @@ class HistogramWindow(tk.Toplevel):
         self._b_msg = ""
         self.thr_line_a = None
         self._after_id = None
+        self._follow_note = ""
         self.title("Histogram")
         self.geometry("1250x860")
         self.configure(background=CARD)
@@ -104,6 +106,11 @@ class HistogramWindow(tk.Toplevel):
         ttk.Label(top, text="mV", style="Card.TLabel").pack(side=tk.LEFT)
         self.ref_lbl = ttk.Label(top, text="", style="Muted.Card.TLabel")
         self.ref_lbl.pack(side=tk.LEFT, padx=(10, 0))
+        self.follow_var = tk.BooleanVar(master=self, value=True)
+        ttk.Checkbutton(top, text="Follow main view", style="Card.TCheckbutton", variable=self.follow_var,
+                        command=lambda: self.set_follow(self.follow_var.get())).pack(side=tk.LEFT, padx=(16, 0))
+        self.follow_lbl = ttk.Label(top, text="", style="Muted.Card.TLabel")
+        self.follow_lbl.pack(side=tk.LEFT, padx=(8, 0))
         self.status_lbl = ttk.Label(top, text="", style="Muted.Card.TLabel")
         self.status_lbl.pack(side=tk.RIGHT)
 
@@ -145,8 +152,45 @@ class HistogramWindow(tk.Toplevel):
         self.tree.bind("<Button-3>", self._on_tree_menu)
 
     # ---------- following the main view ----------
+    @staticmethod
+    def _clip(trace, lo, hi):
+        """The view range cut to the run's own span; a run with no overlap keeps (lo, hi), which
+        holds no samples and so shows the no-samples message."""
+        d = trace["data"]
+        a, b = max(lo, d.t_start), min(hi, d.t_end)
+        return (float(a), float(b)) if a < b else (float(lo), float(hi))
+
     def follow_view(self, lo, hi):
-        """The main chart's visible range changed (filled in by the follow feature)."""
+        """The main chart's visible range changed: while following, every row takes it (clipped to
+        its run). Rows whose window is unchanged keep their results; nothing recomputes when no
+        row changed."""
+        if self._closed or not self.follow_var.get():
+            return
+        changed = False
+        for r in self.rows:
+            new = self._clip(r.trace, lo, hi)
+            if (r.t_from, r.t_to) != new:
+                r.t_from, r.t_to = new
+                self._base.pop(r.id, None)
+                self._spk.pop(r.id, None)
+                changed = True
+        if changed:
+            self._changed(recompute=True)
+
+    def set_follow(self, on):
+        self.follow_var.set(bool(on))
+        self._set_follow_note("")
+        if on:
+            rng = self.app.main_view_range()
+            if rng is not None:
+                self.follow_view(*rng)
+
+    def _set_follow_note(self, text):
+        self._follow_note = text
+        self.follow_lbl.config(text=text)
+
+    def follow_note(self):
+        return self._follow_note
 
     # ---------- rows ----------
     def _plotted(self):
@@ -158,8 +202,12 @@ class HistogramWindow(tk.Toplevel):
     def _add_row(self, trace, t_from=None, t_to=None, role=None, dashed=False, after=None):
         d = trace["data"]
         if t_from is None:
-            rng = self.app._get_range(quiet=True) or (d.t_start, d.t_end)
-            t_from, t_to = max(rng[0], d.t_start), min(rng[1], d.t_end)
+            view = self.app.main_view_range() if self.follow_var.get() else None
+            if view is not None:
+                t_from, t_to = self._clip(trace, *view)
+            else:
+                rng = self.app._get_range(quiet=True) or (d.t_start, d.t_end)
+                t_from, t_to = max(rng[0], d.t_start), min(rng[1], d.t_end)
         info = self._info(trace)
         if role is None:
             role = (info.role if info and info.role else "none")
@@ -206,6 +254,9 @@ class HistogramWindow(tk.Toplevel):
         if not (math.isfinite(a) and math.isfinite(b)) or a >= b:
             return False
         row = self._row(row_id)
+        if self.follow_var.get():                 # a range set by hand ends following
+            self.follow_var.set(False)
+            self._set_follow_note(FOLLOW_OFF_NOTE)
         row.t_from, row.t_to = a, b
         self._base.pop(row_id, None)
         self._spk.pop(row_id, None)

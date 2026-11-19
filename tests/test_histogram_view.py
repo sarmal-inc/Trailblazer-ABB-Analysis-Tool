@@ -415,5 +415,113 @@ def _write_book(path, s1, s2):
         s2.to_excel(wr, sheet_name="Sheet2", index=False)
 
 
+
+class FollowTest(HistBase):
+    NOTE = "Follow main view off — range set by hand."
+
+    def pump(self, seconds=0.6):
+        end = time.monotonic() + seconds
+        while time.monotonic() < end:
+            self.app.update()
+            time.sleep(0.01)
+
+    def zoom(self, w, lo, hi):
+        self.app.tools.zoom_x(lo, hi)
+        self.pump()
+        self.wait(lambda: not w.busy)
+
+    def test_follow_on_by_default_rows_take_view(self):
+        w = self.open()
+        self.assertTrue(w.follow_var.get())
+        self.zoom(w, 1, 2)
+        for r in w.rows:
+            self.assertEqual((round(r.t_from, 9), round(r.t_to, 9)), (1.0, 2.0))
+            want = noise.find_spikes_at(r.trace["data"], 1.0, 2.0, w.threshold)
+            self.assertEqual(len(w._spk[r.id].times), len(want.times))
+        self.assertEqual(self.errors, [])
+
+    def test_clip_to_run(self):
+        w = self.open()
+        self.zoom(w, -1, 2)
+        r = self.row_of(w, 1)
+        self.assertEqual((r.t_from, round(r.t_to, 9)), (r.trace["data"].t_start, 2.0))
+
+    def test_run_outside_range(self):
+        p = os.path.join(self.tmp.name, "run_004.csv")
+        write_run(p, 4, [(0, 1, 20)], seconds=1.0, seed=4)
+        self.app.load_paths([p])
+        self.wait(lambda: not self.app._loading)
+        w = self.open()
+        self.zoom(w, 2, 3)
+        r4 = self.row_of(w, 4)
+        self.assertEqual(w._base[r4.id].get("error"), "No samples in the window")
+        self.assertNotIn(r4.id, {s.row_id for s in w._stats()})
+        self.assertEqual(len(w._stats()), 3)
+        self.assertEqual(self.errors, [])
+
+    def test_hand_edit_turns_follow_off(self):
+        w = self.open()
+        rid = w.rows[0].id
+        self.assertTrue(w.set_row_window(rid, 0.5, 1))
+        self.assertFalse(w.follow_var.get())
+        self.assertEqual(w.follow_note(), self.NOTE)
+        before = [(r.t_from, r.t_to) for r in w.rows]
+        self.zoom(w, 2, 3)
+        self.assertEqual([(r.t_from, r.t_to) for r in w.rows], before)
+
+    def test_retick_snaps_back(self):
+        w = self.open()
+        self.app.tools.zoom_x(1, 3)
+        self.pump()
+        w.set_row_window(w.rows[0].id, 0.5, 1)
+        w.set_follow(True)
+        self.wait(lambda: not w.busy)
+        self.assertTrue(w.follow_var.get())
+        self.assertEqual(w.follow_note(), "")
+        for r in w.rows:
+            self.assertEqual((round(r.t_from, 9), round(r.t_to, 9)), (1.0, 3.0))
+
+    def test_zoom_during_pass_latest_wins(self):
+        w = self.open()
+        real = histogram.level_counts
+
+        def slow(*a, **k):
+            time.sleep(0.2)
+            return real(*a, **k)
+        with mock.patch.object(histogram, "level_counts", side_effect=slow):
+            self.app.tools.zoom_x(1, 2)
+            self.pump()
+            self.assertTrue(w.busy)
+            self.app.tools.zoom_x(2, 3)
+            self.pump()
+            self.wait(lambda: not w.busy)
+        for r in w.rows:
+            self.assertEqual((round(r.t_from, 9), round(r.t_to, 9)), (2.0, 3.0))
+            want = noise.find_spikes_at(r.trace["data"], 2.0, 3.0, w.threshold)
+            self.assertEqual(len(w._spk[r.id].times), len(want.times))
+        self.assertEqual(self.errors, [])
+
+    def test_same_range_no_recompute(self):
+        w = self.open()
+        self.zoom(w, 1, 2)
+        with mock.patch.object(w, "_start", wraps=w._start) as st:
+            self.app.files[0]["alias"] = "renamed"
+            self.app.draw()
+            self.pump()
+            self.assertEqual(st.call_count, 0)
+
+    def test_added_row_uses_view(self):
+        self.app.files[2]["show"] = False
+        self.app.draw()
+        w = self.open()
+        self.zoom(w, 1, 2)
+        self.app.files[2]["show"] = True
+        self.app.draw()
+        self.pump()
+        self.assertEqual(w.add_shown_runs(), 1)
+        r = self.row_of(w, 3)
+        self.assertEqual((round(r.t_from, 9), round(r.t_to, 9)), (1.0, 2.0))
+
+
 if __name__ == "__main__":
     unittest.main()
