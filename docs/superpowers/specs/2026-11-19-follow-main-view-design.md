@@ -53,3 +53,13 @@ show the same time range without retyping it.
 ## Left to the builder
 How the listener is registered (callback list on `App` vs direct calls to open windows), the exact
 debounce value within 300–500 ms, and where the tick box sits in each window's top bar.
+
+## Results (2026-11-19)
+| Item | Target | Measured | Verdict |
+|---|---|---|---|
+| Zoom → Histogram + Binned settled, Test 015 runs 6 + 7 (10 kHz, 0.15 M + 0.6 M samples), 4–20 s | < 3 s | 1.1 s (incl. 0.4 s delay) | pass |
+| Same, Test 008 run_001 + run_006 (500 kHz, 7.4 M + 7.5 M samples), 4–10 s | < 3 s | 1.0 s (incl. 0.4 s delay) | pass |
+| Spike counts 4–20 s at threshold 4.6 mV | record | run 6: 264 (run ends at 15 s), run 7: 20,992 | recorded |
+
+Build note: when the followed range reaches the shown runs' start or end, that side of the Binned
+From/To stays open (empty box), so the last, shorter bin is kept.
