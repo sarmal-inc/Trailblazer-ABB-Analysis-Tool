@@ -26,6 +26,7 @@ OK_BG = "#ffffff"
 GRAB_PX = 6
 DASH = "–"
 NO_SAMPLES = "No samples in the window"
+LEVEL_CACHE_MIN = 32       # level-count cache keeps at least this many windows (else 2 per row)
 FOLLOW_OFF_NOTE = "Follow main view off — range set by hand."
 ROLE_TEXT = {"negative": "Negative", "positive": "Positive", "none": "— (not compared)"}
 COLUMNS = ["Plot", "Run", "Sample", "Gain (mV)", "From (s)", "To (s)", "Baseline (mV)", "Spikes",
@@ -168,6 +169,8 @@ class HistogramWindow(tk.Toplevel):
             return
         changed = False
         for r in self.rows:
+            if r.dashed:                      # duplicates exist to hold their own, different window
+                continue
             new = self._clip(r.trace, lo, hi)
             if (r.t_from, r.t_to) != new:
                 r.t_from, r.t_to = new
@@ -365,7 +368,14 @@ class HistogramWindow(tk.Toplevel):
         if hit is not None and hit[0] is data:
             return hit[1], hit[2]
         lv = histogram.level_counts(data, i0, i1)
-        self._level_cache[key] = (data, lv[0], lv[1])
+        cache = self._level_cache
+        cache[key] = (data, lv[0], lv[1])
+        cap = max(LEVEL_CACHE_MIN, 2 * len(self.rows))
+        while len(cache) > cap:               # every zoom adds windows: drop the oldest
+            try:
+                del cache[next(iter(cache))]
+            except (KeyError, StopIteration, RuntimeError):
+                break
         return lv
 
     def _work(self, gen, cancel, jobs, thr):            # never touches Tk

@@ -15,6 +15,7 @@ import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import histogram  # noqa: E402
+import histogram_view  # noqa: E402
 import multi_file_analyzer as m  # noqa: E402
 import noise  # noqa: E402
 import run_info  # noqa: E402
@@ -521,6 +522,24 @@ class FollowTest(HistBase):
         self.assertEqual(w.add_shown_runs(), 1)
         r = self.row_of(w, 3)
         self.assertEqual((round(r.t_from, 9), round(r.t_to, 9)), (1.0, 2.0))
+
+
+    def test_duplicate_rows_keep_their_window(self):
+        w = self.open()
+        src = self.row_of(w, 3)
+        dup = w.duplicate_row(src.id)
+        self.wait(lambda: not w.busy)
+        w.set_row_window(dup.id, 2, 4)
+        w.set_follow(True)
+        self.zoom(w, 1, 2)
+        self.assertEqual((round(src.t_from, 9), round(src.t_to, 9)), (1.0, 2.0))
+        self.assertEqual((dup.t_from, dup.t_to), (2.0, 4.0))
+
+    def test_level_cache_bounded(self):
+        w = self.open()
+        for k in range(12):
+            self.zoom(w, 0.1 * k, 0.1 * k + 1.5)
+        self.assertLessEqual(len(w._level_cache), max(histogram_view.LEVEL_CACHE_MIN, 2 * len(w.rows)))
 
 
 if __name__ == "__main__":

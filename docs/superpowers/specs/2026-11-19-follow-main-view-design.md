@@ -59,7 +59,11 @@ debounce value within 300–500 ms, and where the tick box sits in each window's
 |---|---|---|---|
 | Zoom → Histogram + Binned settled, Test 015 runs 6 + 7 (10 kHz, 0.15 M + 0.6 M samples), 4–20 s | < 3 s | 1.1 s (incl. 0.4 s delay) | pass |
 | Same, Test 008 run_001 + run_006 (500 kHz, 7.4 M + 7.5 M samples), 4–10 s | < 3 s | 1.0 s (incl. 0.4 s delay) | pass |
+| Zoom, 28 Test 015 runs (6.4 M samples) | < 3 s | 0.9–1.2 s | pass |
+| Zoom, 8 Test 008 runs (59.6 M samples) | < 3 s | 1.4–2.1 s (≈ 0.25 s per 7.4 M run; 160 such runs would take ~40 s) | pass at 8 runs |
 | Spike counts 4–20 s at threshold 4.6 mV | record | run 6: 264 (run ends at 15 s), run 7: 20,992 | recorded |
 
 Build note: when the followed range reaches the shown runs' start or end, that side of the Binned
 From/To stays open (empty box), so the last, shorter bin is kept.
+
+Review fixes: duplicate (dashed) Histogram rows keep their own window and are not changed by following; the per-window level-count cache keeps at most max(32, 2 × rows) entries, so zooming does not grow memory.
