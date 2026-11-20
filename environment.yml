@@ -1,0 +1,26 @@
+# Conda environment for analysis_tools
+#
+#   conda env create -f environment.yml
+#   conda activate analysis_tools
+#
+# Standard library modules used by the code (tkinter, threading, queue,
+# concurrent.futures, dataclasses, hashlib, json, tempfile, shutil, ...) need
+# no install, except that conda must provide the Tk libraries for tkinter.
+#
+# Local project modules (settings, trace_store, chart_tools, noise,
+# smoothing_function) are not
+# installed here; run the tools from the project folder so they're importable.
+
+name: analysis_tools
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - numpy
+  - pandas
+  - matplotlib      # optional in the code (charts), but installed by default
+  - openpyxl        # reading .xlsx / .xlsm workbooks exported by the instrument
+  - tk              # Tk/Tcl libraries behind tkinter and the TkAgg backend
+  - pip
+  - pip:
+      - tkinterdnd2 # optional: drag and drop of files from Explorer/Finder

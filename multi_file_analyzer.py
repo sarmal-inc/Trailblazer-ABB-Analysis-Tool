@@ -64,6 +64,15 @@ Chart tools:
     (Home) to the full range, and Save image... writes the plot to a PNG file. The keys
     W, X, Y, C, BackSpace and Home work only after the chart has focus: click it first.
 
+Smoothing:
+    Smooth... (toolbar) or View > Smooth selected trace... opens a tab next to Statistics and
+    Noise for the selected trace (or the first shown one). Pick a window size in points and a
+    start x (defaults to the window start; click the chart to set it). Points from start x on are
+    replaced by a pandas rolling mean. Export CSV... saves raw and smoothed columns; Send to main
+    chart adds the result as a new trace "<name> (smoothed N pts)" (held in memory, not cached),
+    which then works with Calculate, Analyze noise and exports like any other trace.
+    smoothing_function.py must sit next to this file.
+
 Requirements:
     pip install pandas matplotlib openpyxl numpy
     pip install tkinterdnd2      (optional: drag files or folders onto the window)
@@ -92,7 +101,9 @@ import run_info
 from binned_view import BinnedWindow
 from histogram_view import HistogramWindow
 from settings import default_settings_path, load_settings, parse_settings, save_settings
-from trace_store import cache_info, clear_cache, default_cache_dir, is_cached, is_cloud_only, open_traces
+from trace_store import (TraceData, cache_info, clear_cache, default_cache_dir, is_cached,
+                         is_cloud_only, open_traces)
+from smoothing_function import open_smoothing_tab
 
 try:
     import matplotlib
@@ -602,7 +613,7 @@ PRETTY = {
     "data_file": "Data file", "duration_s": "Duration (s)", "recording_delay_s": "Recording delay (s)",
     "record_while_step": "Record while step", "stopped_early": "Stopped early",
     "samples": "Samples", "max_mv": "Max (mV)", "min_mv": "Min (mV)", "mean_mv": "Mean (mV)",
-    "std_mv": "Std (mV)", "timestamp": "Timestamp",
+    "std_mv": "Std (mV)", "timestamp": "Timestamp", "smoothing": "Smoothing",
 }
 
 # White tick inside the show/hide box (pixel, 2 px tall)
@@ -1129,6 +1140,8 @@ class App(TkBase):
         m.add_command(label="Noise settings…", command=self.show_noise_settings)
         m.add_command(label="Histogram…", command=self.open_histogram)
         m.add_command(label="Binned…", command=self.open_binned)
+        m.add_separator()
+        m.add_command(label="Smooth selected trace…", command=self.open_smoothing)
         bar.add_cascade(label="View", menu=m)
 
         m = tk.Menu(bar, tearoff=False)
@@ -1172,6 +1185,7 @@ class App(TkBase):
         self.hist_btn.pack(side=tk.LEFT, padx=(8, 0))
         self.bin_btn = ttk.Button(bar, text="Binned\u2026", command=self.open_binned)
         self.bin_btn.pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Button(bar, text="Smooth…", command=self.open_smoothing).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Checkbutton(bar, text="Shown files only", style="Card.TCheckbutton",
                         variable=self.visible_only, command=self._recalc_if_done).pack(side=tk.RIGHT)
         ttk.Checkbutton(bar, text="Sample std (n−1)", style="Card.TCheckbutton",
@@ -2174,6 +2188,64 @@ class App(TkBase):
             messagebox.showinfo("Noise view", "Add a trace first.")
             return
         self.open_noise_view(f)
+
+    # ---------- smoothing ----------
+    def open_smoothing(self, f=None):
+        """Open a rolling-average tab (smoothing_function.py) for one trace in the results notebook.
+
+        Uses the trace selected in the file list, else the first shown one. Start x defaults to
+        the start of the current window. "Send to main chart" adds the result as a new trace."""
+        if f is None:
+            sel = self._selected_files()
+            f = sel[0] if sel else next((x for x in self.files if x["show"]), None)
+        if f is None:
+            messagebox.showinfo("Smoothing", "Add a trace first.")
+            return None
+        d = f["data"]
+        rng = self._get_range(quiet=True)
+        self.config(cursor="watch"); self.update_idletasks()
+        try:
+            t = np.array(d.times(0, d.n), dtype=float)
+            mv = np.array(d.values(0, d.n), dtype=float)
+            return open_smoothing_tab(
+                self.results_nb, t, mv, name=self._label(f),
+                x_label=f.get("t_label", "Time (s)"), y_label=f.get("v_label", "Signal (mV)"),
+                start_x=rng[0] if rng else None,
+                on_apply=lambda x, s, p: self._add_smoothed_trace(f, x, np.where(np.isnan(s), mv, s), p))
+        finally:
+            self.config(cursor="")
+
+    def _add_smoothed_trace(self, src, t, mv, params):
+        """Add a smoothed copy of src as a new in-memory trace (points before start x are raw)."""
+        if self._loading or self._noise_running:
+            self.status.config(text="Wait for loading or noise analysis to finish, then send it again.")
+            return None
+        window, start_x = params["window"], params.get("start_x")
+        desc = f"{window}-point {'centered' if params.get('center', True) else 'trailing'} rolling average"
+        if start_x is not None:
+            desc += f" from {start_x:g} s"
+        self.config(cursor="watch"); self.update_idletasks()
+        try:
+            data = TraceData.from_arrays(t, mv)
+        finally:
+            self.config(cursor="")
+        fields = {k: v for k, v in src.items()
+                  if k not in ("data", "n", "show", "color", "load_idx", "alias")}
+        fields["meta"] = dict(src["meta"], smoothing=desc)
+        new = dict(fields, data=data, n=data.n, show=True, color=None, load_idx=self._load_seq,
+                   alias=f"{src.get('alias') or src['name']} (smoothed {window} pts)")
+        self._load_seq += 1
+        self.files.append(new)
+        new["color"] = self._next_color()
+        self._auto_ctx = None
+        self._mark_noise_outdated()
+        self.files[:] = sorted_files(self.files, self.sort_var.get())
+        self.refresh_files()
+        self._select_file(new)
+        self.draw()
+        self._recalc_if_done(redraw=False)
+        self.status.config(text=f"Added {new['alias']}: {desc}.")
+        return new
 
     def _on_noise_double(self, event):
         row = self.ntree.identify_row(event.y)
