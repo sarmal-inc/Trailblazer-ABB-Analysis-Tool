@@ -17,6 +17,8 @@ PER_DECADE = 30         # log bins per decade
 MAX_PLOTTED = 12        # rows drawn at once
 MAX_LIN_BINS = 20_000   # cap on linear bins (finer DAQ steps are merged)
 DASH = "–"
+LIN_SAMPLES = 20        # plot C: one bin per whole sample up to this many samples, log bins beyond
+D_MAX_POINTS = 5000     # plot D: most points drawn per row
 
 
 def level_counts(trace, i0, i1):
@@ -108,6 +110,59 @@ def spike_edges(threshold_rel, top_rel):
     if top_rel <= threshold_rel:
         return np.array([threshold_rel, threshold_rel * 10 ** (1 / PER_DECADE)])
     return _log_edges(threshold_rel, top_rel)
+
+
+def _finite_pos(sets):
+    parts = [np.asarray(w, dtype=np.float64).ravel() for w in sets]
+    w = np.concatenate(parts) if parts else np.empty(0)
+    return w[np.isfinite(w) & (w > 0)]
+
+
+def width_edges(width_sets_us, dt_us):
+    """Bin edges (us) for plot C, or None with no finite widths. With a sample interval dt_us (the
+    smallest among the plotted rows): one bin per whole sample, centred on k*dt for k = 1 ..
+    LIN_SAMPLES, PER_DECADE log bins beyond up to the widest, and log bins below for widths under
+    half a sample. Without one (non-uniform sampling): log bins from the narrowest to the widest."""
+    w = _finite_pos(width_sets_us)
+    if len(w) == 0:
+        return None
+    lo, hi = float(w.min()), float(w.max())
+    if not dt_us or not dt_us > 0:
+        if hi <= lo:
+            return np.array([lo, lo * 10 ** (1 / PER_DECADE)])
+        return _log_edges(lo, hi)
+    edges = (np.arange(1, LIN_SAMPLES + 2) - 0.5) * dt_us
+    if hi > edges[-1]:
+        edges = np.concatenate([edges, _log_edges(edges[-1], hi)[1:]])
+    if lo < edges[0]:
+        edges = np.concatenate([_log_edges(lo, edges[0])[:-1], edges])
+    return edges
+
+
+def width_density(widths_us, edges, duration):
+    """Spikes per second per us in each bin (NaN widths ignored)."""
+    w = np.asarray(widths_us, dtype=np.float64)
+    hist = np.histogram(w[np.isfinite(w)], edges)[0]
+    return hist / max(duration, 1e-12) / np.diff(edges)
+
+
+def width_stats(widths_us):
+    """(median, 25th percentile, 75th percentile, count) of the finite widths; (None, None, None, 0)
+    with none."""
+    w = np.asarray(widths_us, dtype=np.float64)
+    w = w[np.isfinite(w)]
+    if len(w) == 0:
+        return None, None, None, 0
+    q25, med, q75 = np.percentile(w, [25, 50, 75])
+    return float(med), float(q25), float(q75), len(w)
+
+
+def subsample(n, cap=None, seed=0):
+    """Sorted indices of at most cap (default D_MAX_POINTS) of n points, the same every call."""
+    cap = D_MAX_POINTS if cap is None else cap
+    if n <= cap:
+        return np.arange(n)
+    return np.sort(np.random.default_rng(seed).choice(n, cap, replace=False))
 
 
 def reference_level(baselines, roles):
