@@ -429,9 +429,12 @@ class FollowTest(HistBase):
             time.sleep(0.01)
 
     def zoom(self, w, lo, hi):
+        """Zoom the main chart and wait until the window has followed: the main chart's redraw
+        (60 ms debounce) and the follow push (FOLLOW_DELAY_MS) have both fired and the window's
+        recompute is done. A fixed sleep raced these timers whenever a redraw was slow."""
         self.app.tools.zoom_x(lo, hi)
-        self.pump()
-        self.wait(lambda: not w.busy)
+        self.app.update()
+        self.wait(lambda: self.app._xlim_job is None and self.app._follow_job is None and not w.busy)
 
     def test_follow_on_by_default_rows_take_view(self):
         w = self.open()
