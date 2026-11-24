@@ -84,6 +84,7 @@ class HistogramWindow(tk.Toplevel):
         self._drag_rel = None
         self._a_artists, self._b_artists = [], []
         self._c_artists, self._d_artists = [], []
+        self._c_rows = []
         self._b_msg = ""
         self._d_note = ""
         self.width_mode = "above"     # width shown in plots C/D and the table: "above" or "fwhm"
@@ -553,6 +554,10 @@ class HistogramWindow(tk.Toplevel):
     def d_note(self):
         return self._d_note
 
+    def c_lines(self):
+        """[(row, stairs artist)] drawn in plot C."""
+        return list(self._c_rows)
+
     # ---------- widths ----------
     def set_width_mode(self, mode):
         """Show "above" (time above threshold) or "fwhm" widths; redraws from the results in hand."""
@@ -670,34 +675,38 @@ class HistogramWindow(tk.Toplevel):
         self._c_artists, self._d_artists = [], []
         self._d_note = ""
         widths = [(r, self._spk[r.id], self._widths_us(self._spk[r.id])) for r in rows if r.id in self._spk]
-        dts = [r.trace["data"].dt for r, _, _ in widths if r.trace["data"].dt is not None]
-        dt_us = min(dts) * 1e6 if dts else None
-        edges = histogram.width_edges([w for _, _, w in widths], dt_us)
         subsampled = False
-        if edges is not None:
-            for r, sp, w in widths:
-                color = r.trace.get("color") or "#0f766e"
-                ok = np.isfinite(w)
-                if not ok.any():
-                    continue
-                d = histogram.width_density(w, edges, self._base[r.id]["duration"])
-                self._c_artists.append(cx.stairs(np.where(d > 0, d, np.nan), edges, color=color,
-                                                 ls="--" if r.dashed else "-", lw=1.3))
-                hts = (sp.heights + sp.baseline - ref)[ok]
-                ww = w[ok]
-                hts, ww = hts[hts > 0], ww[hts > 0]
-                if not len(ww):
-                    continue
-                pick = histogram.subsample(len(ww))
-                subsampled |= len(pick) < len(ww)
-                self._d_artists.append(dx.scatter(hts[pick], ww[pick], s=4, alpha=0.4, color=color,
-                                                  marker="x" if r.dashed else "o", linewidths=0.6))
-            if self._c_artists:
-                cx.set_xscale("log"); cx.set_yscale("log")
-            if self._d_artists:
-                dx.set_xscale("log"); dx.set_yscale("log")
+        dts = set()
+        self._c_rows = []
+        for r, sp, w in widths:
+            color = r.trace.get("color") or "#0f766e"
+            ok = np.isfinite(w)
+            dt = r.trace["data"].dt
+            edges = histogram.width_edges([w], None if dt is None else dt * 1e6)  # the row's own samples
+            if edges is None:
+                continue
+            dts.add(None if dt is None else round(dt * 1e6, 6))
+            d = histogram.width_density(w, edges, self._base[r.id]["duration"])
+            art = cx.stairs(np.where(d > 0, d, np.nan), edges, color=color, ls="--" if r.dashed else "-", lw=1.3)
+            self._c_artists.append(art)
+            self._c_rows.append((r, art))
+            hts = (sp.heights + sp.baseline - ref)[ok]
+            ww = w[ok]
+            hts, ww = hts[hts > 0], ww[hts > 0]
+            if not len(ww):
+                continue
+            pick = histogram.subsample(len(ww))
+            subsampled |= len(pick) < len(ww)
+            self._d_artists.append(dx.scatter(hts[pick], ww[pick], s=4, alpha=0.4, color=color,
+                                              marker="x" if r.dashed else "o", linewidths=0.6))
+        if self._c_artists:
+            cx.set_xscale("log"); cx.set_yscale("log")
+        if self._d_artists:
+            dx.set_xscale("log"); dx.set_yscale("log")
         name = "FWHM" if self.width_mode == "fwhm" else "time above threshold"
-        res = f"1 sample = {dt_us:g} µs" if dt_us is not None else "non-uniform sampling"
+        steps = sorted(d for d in dts if d is not None)
+        res = "; ".join(([f"1 sample = {', '.join(f'{d:g}' for d in steps)} µs"] if steps else [])
+                        + (["non-uniform sampling"] if None in dts else [])) or "no widths"
         label = f"{name} (µs) · {res}"
         med = getattr(self.app, "_median_applied", 0)
         if med:

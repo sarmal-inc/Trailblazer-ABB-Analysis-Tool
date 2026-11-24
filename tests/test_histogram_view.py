@@ -624,6 +624,22 @@ class WidthViewTests(HistBase):
             self.assertIn(c, head)
         self.assertIn("Width,Time above threshold", text)
 
+    def test_mixed_rates_each_row_binned_on_its_own_samples(self):
+        p = os.path.join(self.tmp.name, "run_009.csv")
+        with mock.patch(__name__ + ".FS", 5_000):          # 200 us samples (the CSV keeps 4 decimals)
+            write_run(p, 9, [(0, 4, 300)], seed=9)
+        self.app.load_paths([p])
+        self.wait(lambda: not self.app._loading)
+        w = self.open()
+        self.assertEqual(len(w.plotted_count()), 4)
+        for r, art in w.c_lines():
+            dt = r.trace["data"].dt * 1e6
+            k = art.get_data().edges / dt - 0.5
+            np.testing.assert_allclose(k, np.round(k), atol=1e-6)
+        label = w.ax_c.get_xlabel()
+        self.assertIn("1 sample = 100, 200 µs", label)
+        self.assertEqual(len(w.c_lines()), 4)
+
     def test_median_note(self):
         w = self.open()
         self.app._median_applied = 3

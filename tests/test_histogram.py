@@ -197,6 +197,21 @@ class WidthHelperTests(unittest.TestCase):
         self.assertAlmostEqual(q25, 1.75)
         self.assertAlmostEqual(q75, 3.25)
 
+    def test_log_bins_hold_whole_samples(self):
+        dt = 2.0
+        e = h.width_edges([np.arange(1, 400) * dt], dt)
+        k = e / dt - 0.5
+        np.testing.assert_allclose(k, np.round(k), atol=1e-9)       # every edge on a half-sample boundary
+        self.assertTrue(np.all(np.diff(e) > 0))
+
+    def test_even_widths_give_flat_density(self):
+        dt = 2.0
+        w = np.arange(1, 400) * dt                                  # one spike at every whole-sample width
+        e = h.width_edges([w], dt)
+        d = h.width_density(w, e, 1.0)
+        inner = d[:-1]                                              # last bin may be cut at the widest
+        np.testing.assert_allclose(inner, 1 / dt, rtol=1e-9)
+
     def test_subsample(self):
         self.assertEqual(len(h.subsample(100)), 100)
         s = h.subsample(20000)

@@ -120,8 +120,9 @@ def _finite_pos(sets):
 
 def width_edges(width_sets_us, dt_us):
     """Bin edges (us) for plot C, or None with no finite widths. With a sample interval dt_us (the
-    smallest among the plotted rows): one bin per whole sample, centred on k*dt for k = 1 ..
-    LIN_SAMPLES, PER_DECADE log bins beyond up to the widest, and log bins below for widths under
+    row's own sample interval): one bin per whole sample, centred on k*dt for k = 1 ..
+    LIN_SAMPLES, about PER_DECADE log bins beyond up to the widest, snapped to half-sample
+    boundaries so every bin holds a whole number of samples, and log bins below for widths under
     half a sample. Without one (non-uniform sampling): log bins from the narrowest to the widest."""
     w = _finite_pos(width_sets_us)
     if len(w) == 0:
@@ -133,7 +134,12 @@ def width_edges(width_sets_us, dt_us):
         return _log_edges(lo, hi)
     edges = (np.arange(1, LIN_SAMPLES + 2) - 0.5) * dt_us
     if hi > edges[-1]:
-        edges = np.concatenate([edges, _log_edges(edges[-1], hi)[1:]])
+        # log bins snapped to half-sample boundaries: each holds a whole number of sample widths
+        k = np.unique(np.round(_log_edges(edges[-1], hi)[1:] / dt_us - 0.5))
+        k = k[k > LIN_SAMPLES]
+        if len(k) == 0 or (k[-1] + 0.5) * dt_us < hi:                  # the widest must be inside
+            k = np.append(k, max(LIN_SAMPLES + 1, np.ceil(hi / dt_us - 0.5)))
+        edges = np.concatenate([edges, (k + 0.5) * dt_us])
     if lo < edges[0]:
         edges = np.concatenate([_log_edges(lo, edges[0])[:-1], edges])
     return edges
