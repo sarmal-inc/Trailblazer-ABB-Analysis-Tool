@@ -151,5 +151,74 @@ class CompareTests(unittest.TestCase):
         self.assertEqual(rs(2, 0, duration=0.0).rate, 0.0)
 
 
+class WidthHelperTests(unittest.TestCase):
+    def test_whole_sample_bins_centre_on_multiples(self):
+        e = h.width_edges([np.array([2.0, 4.0, 6.0])], 2.0)
+        self.assertAlmostEqual(e[0], 1.0)
+        self.assertAlmostEqual(e[1], 3.0)
+        hist = np.histogram([2.0, 4.0, 6.0], e)[0]
+        self.assertEqual(list(hist[:3]), [1, 1, 1])      # no empty bins between whole-sample widths
+
+    def test_log_part_beyond_lin_samples(self):
+        e = h.width_edges([np.array([2.0, 400.0])], 2.0)
+        self.assertAlmostEqual(e[h.LIN_SAMPLES], 41.0)
+        self.assertGreaterEqual(e[-1], 400.0)
+        self.assertTrue(np.all(np.diff(e) > 0))
+
+    def test_sub_half_sample_widths_get_bins(self):
+        e = h.width_edges([np.array([0.3, 2.0])], 2.0)     # FWHM can be under half a sample
+        self.assertLessEqual(e[0], 0.3)
+        self.assertTrue(np.all(np.diff(e) > 0))
+
+    def test_mixed_rates_10khz_widths_inside_range(self):
+        e = h.width_edges([np.array([2.0, 4.0]), np.array([100.0, 200.0])], 2.0)
+        self.assertEqual(np.histogram([100.0, 200.0], e)[0].sum(), 2)
+
+    def test_non_uniform_log_only(self):
+        e = h.width_edges([np.array([3.0, 30.0])], None)
+        self.assertTrue(np.all(np.diff(np.log10(e)) > 0))
+        self.assertLessEqual(e[0], 3.0)
+        self.assertGreaterEqual(e[-1], 30.0)
+
+    def test_all_nan_or_empty(self):
+        self.assertIsNone(h.width_edges([np.array([np.nan]), np.empty(0)], 2.0))
+        self.assertEqual(h.width_stats(np.array([np.nan])), (None, None, None, 0))
+        self.assertEqual(h.width_stats(np.empty(0)), (None, None, None, 0))
+
+    def test_density_units(self):
+        e = np.array([1.0, 3.0])
+        d = h.width_density(np.array([2.0, 2.0, np.nan]), e, 4.0)
+        self.assertAlmostEqual(d[0], 2 / 4.0 / 2.0)
+
+    def test_stats(self):
+        med, q25, q75, n = h.width_stats(np.array([1.0, 2.0, 3.0, 4.0, np.nan]))
+        self.assertEqual(n, 4)
+        self.assertAlmostEqual(med, 2.5)
+        self.assertAlmostEqual(q25, 1.75)
+        self.assertAlmostEqual(q75, 3.25)
+
+    def test_log_bins_hold_whole_samples(self):
+        dt = 2.0
+        e = h.width_edges([np.arange(1, 400) * dt], dt)
+        k = e / dt - 0.5
+        np.testing.assert_allclose(k, np.round(k), atol=1e-9)       # every edge on a half-sample boundary
+        self.assertTrue(np.all(np.diff(e) > 0))
+
+    def test_even_widths_give_flat_density(self):
+        dt = 2.0
+        w = np.arange(1, 400) * dt                                  # one spike at every whole-sample width
+        e = h.width_edges([w], dt)
+        d = h.width_density(w, e, 1.0)
+        inner = d[:-1]                                              # last bin may be cut at the widest
+        np.testing.assert_allclose(inner, 1 / dt, rtol=1e-9)
+
+    def test_subsample(self):
+        self.assertEqual(len(h.subsample(100)), 100)
+        s = h.subsample(20000)
+        self.assertEqual(len(s), h.D_MAX_POINTS)
+        self.assertTrue(np.all(np.diff(s) > 0))
+        np.testing.assert_array_equal(s, h.subsample(20000))   # deterministic
+
+
 if __name__ == "__main__":
     unittest.main()

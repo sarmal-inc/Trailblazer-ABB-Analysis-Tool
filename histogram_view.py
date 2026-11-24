@@ -1,6 +1,7 @@
 """Histogram window: intensity histograms of every sample (A) and of spike peaks (B) for a table of
 rows (a trace + a time window), one shared spike threshold, and positive-vs-negative comparison at
 matched PMT gain. See docs/superpowers/specs/2026-11-18-intensity-histogram-design.md."""
+import dataclasses
 import math
 import os
 import queue
@@ -17,6 +18,7 @@ from matplotlib.figure import Figure
 import histogram
 import noise
 import run_info
+import spike_width
 
 CARD = "#ffffff"
 MUTED = "#4d5967"
@@ -27,10 +29,12 @@ GRAB_PX = 6
 DASH = "–"
 NO_SAMPLES = "No samples in the window"
 LEVEL_CACHE_MIN = 32       # level-count cache keeps at least this many windows (else 2 per row)
+WIDTH_MODES = {"above": "Time above threshold", "fwhm": "FWHM"}
 FOLLOW_OFF_NOTE = "Follow main view off — range set by hand."
 ROLE_TEXT = {"negative": "Negative", "positive": "Positive", "none": "— (not compared)"}
 COLUMNS = ["Plot", "Run", "Sample", "Gain (mV)", "From (s)", "To (s)", "Baseline (mV)", "Spikes",
-           "Rate (/s)", "±", "Median peak (mV)", "Max peak (mV)", "× negative",
+           "Rate (/s)", "±", "Median peak (mV)", "Max peak (mV)", "Median width (µs)", "Width IQR (µs)",
+           "FWHM overlapped", "× negative",
            "SD above negative", "Above limit"]
 
 
@@ -79,12 +83,16 @@ class HistogramWindow(tk.Toplevel):
         self._dragging = False
         self._drag_rel = None
         self._a_artists, self._b_artists = [], []
+        self._c_artists, self._d_artists = [], []
+        self._c_rows = []
         self._b_msg = ""
+        self._d_note = ""
+        self.width_mode = "above"     # width shown in plots C/D and the table: "above" or "fwhm"
         self.thr_line_a = None
         self._after_id = None
         self._follow_note = ""
         self.title("Histogram")
-        self.geometry("1250x860")
+        self.geometry(f"1250x{max(700, min(1000, self.winfo_screenheight() - 80))}")
         self.configure(background=CARD)
         self.protocol("WM_DELETE_WINDOW", self.close)
         self._build()
@@ -112,11 +120,18 @@ class HistogramWindow(tk.Toplevel):
                         command=lambda: self.set_follow(self.follow_var.get())).pack(side=tk.LEFT, padx=(16, 0))
         self.follow_lbl = ttk.Label(top, text="", style="Muted.Card.TLabel")
         self.follow_lbl.pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Label(top, text="Width", style="Card.TLabel").pack(side=tk.LEFT, padx=(16, 0))
+        self.width_var = tk.StringVar(master=self, value=WIDTH_MODES[self.width_mode])
+        wc = ttk.Combobox(top, textvariable=self.width_var, values=list(WIDTH_MODES.values()),
+                          state="readonly", width=20)
+        wc.pack(side=tk.LEFT, padx=(6, 0))
+        wc.bind("<<ComboboxSelected>>", lambda e: self.set_width_mode(
+            next(k for k, v in WIDTH_MODES.items() if v == self.width_var.get())))
         self.status_lbl = ttk.Label(top, text="", style="Muted.Card.TLabel")
         self.status_lbl.pack(side=tk.RIGHT)
 
-        self.fig = Figure(figsize=(11, 3.8), dpi=100, facecolor=CARD)
-        self.ax_a, self.ax_b = self.fig.subplots(1, 2)
+        self.fig = Figure(figsize=(11, 6.2), dpi=100, facecolor=CARD)
+        (self.ax_a, self.ax_b), (self.ax_c, self.ax_d) = self.fig.subplots(2, 2)
         self.canvas = FigureCanvasTkAgg(self.fig, master=self)
         self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=12)
         for name, h in (("button_press_event", self._on_press), ("motion_notify_event", self._on_motion),
@@ -414,7 +429,10 @@ class HistogramWindow(tk.Toplevel):
                 if bases.get(rid, (None, None, True))[2]:
                     continue
                 try:
-                    put(("spikes", gen, rid, noise.find_spikes_at(data, a, b, thr)))
+                    sp = noise.find_spikes_at(data, a, b, thr)
+                    i0, i1 = data.index_range(a, b)
+                    fw = spike_width.fwhm(data, sp.peak_idx, bases[rid][0], i0, i1)
+                    put(("spikes", gen, rid, dataclasses.replace(sp, fwhm=fw)))
                 except Exception as e:                   # this row only
                     put(("base", gen, rid, {"error": f"error: {e}"}))
         except Exception as e:                           # shown in the status line
@@ -515,6 +533,7 @@ class HistogramWindow(tk.Toplevel):
                 cells.update({"Rate (/s)": st.rate, "±": st.err,
                               "Median peak (mV)": float(np.median(hts)) if len(hts) else DASH,
                               "Max peak (mV)": float(np.max(hts)) if len(hts) else DASH,
+                              **self._width_cells(sp),
                               "× negative": DASH if c.x_negative is None else c.x_negative,
                               "SD above negative": DASH if c.sd_above is None else c.sd_above,
                               "Above limit": DASH if c.above_limit is None else ("yes" if c.above_limit else "no")})
@@ -522,10 +541,57 @@ class HistogramWindow(tk.Toplevel):
         return pd.DataFrame(out, columns=COLUMNS)
 
     def summary_lines(self):
-        return histogram.compare(self._stats())[1]
+        lines = histogram.compare(self._stats())[1]
+        if self.width_mode == "fwhm":
+            o, n = self.fwhm_overlap()
+            if n:
+                lines.append(f"FWHM: {o:,} of {n:,} spikes overlapped (left out)")
+        return lines
 
     def plotted_count(self):
-        return len(self._a_artists), len(self._b_artists)
+        return len(self._a_artists), len(self._b_artists), len(self._c_artists), len(self._d_artists)
+
+    def d_note(self):
+        return self._d_note
+
+    def c_lines(self):
+        """[(row, stairs artist)] drawn in plot C."""
+        return list(self._c_rows)
+
+    # ---------- widths ----------
+    def set_width_mode(self, mode):
+        """Show "above" (time above threshold) or "fwhm" widths; redraws from the results in hand."""
+        if mode not in WIDTH_MODES:
+            raise ValueError(mode)
+        self.width_mode = mode
+        self.width_var.set(WIDTH_MODES[mode])
+        self._refresh()
+
+    def _widths_us(self, sp, mode=None):
+        """Selected widths (us) of a SpikeResult, one per spike; NaN = overlapped (FWHM)."""
+        w = sp.fwhm if (mode or self.width_mode) == "fwhm" else sp.width_above
+        if len(w) != len(sp.times):                        # not computed for this result
+            return np.full(len(sp.times), np.nan)
+        return np.asarray(w, dtype=np.float64) * 1e6
+
+    def _width_cells(self, sp):
+        med, q25, q75, _ = histogram.width_stats(self._widths_us(sp))
+        n = len(sp.times)
+        o = int(np.count_nonzero(np.isnan(self._widths_us(sp, "fwhm"))))
+        return {"Median width (µs)": DASH if med is None else med,
+                "Width IQR (µs)": DASH if med is None else f"{self._fmt(q25)}–{self._fmt(q75)}",
+                "FWHM overlapped": f"{o:,} of {n:,}"}
+
+    def fwhm_overlap(self):
+        """(overlapped, total) spikes over the plotted rows."""
+        o = n = 0
+        for r in self.rows:
+            sp, b = self._spk.get(r.id), self._base.get(r.id)
+            if not r.plot or sp is None or b is None or "error" in b:
+                continue
+            n += len(sp.times)
+            o += int(np.count_nonzero(np.isnan(self._widths_us(sp, "fwhm"))))
+        return o, n
 
     def b_message(self):
         return self._b_msg
@@ -595,11 +661,64 @@ class HistogramWindow(tk.Toplevel):
         bx.set_title("B. Spike peaks", loc="left", fontsize=10)
         bx.set_xlabel(f"spike peak − {ref:.2f} mV")
         bx.set_ylabel("spikes per s per bin")
+        self._draw_widths(rows, ref)
         try:
             self.fig.tight_layout()
         except Exception:
             pass
         self.canvas.draw_idle()
+
+    def _draw_widths(self, rows, ref):
+        """Plot C (width histogram) and D (width vs height) for the plotted rows."""
+        cx, dx = self.ax_c, self.ax_d
+        cx.clear(); dx.clear()
+        self._c_artists, self._d_artists = [], []
+        self._d_note = ""
+        widths = [(r, self._spk[r.id], self._widths_us(self._spk[r.id])) for r in rows if r.id in self._spk]
+        subsampled = False
+        dts = set()
+        self._c_rows = []
+        for r, sp, w in widths:
+            color = r.trace.get("color") or "#0f766e"
+            ok = np.isfinite(w)
+            dt = r.trace["data"].dt
+            edges = histogram.width_edges([w], None if dt is None else dt * 1e6)  # the row's own samples
+            if edges is None:
+                continue
+            dts.add(None if dt is None else round(dt * 1e6, 6))
+            d = histogram.width_density(w, edges, self._base[r.id]["duration"])
+            art = cx.stairs(np.where(d > 0, d, np.nan), edges, color=color, ls="--" if r.dashed else "-", lw=1.3)
+            self._c_artists.append(art)
+            self._c_rows.append((r, art))
+            hts = (sp.heights + sp.baseline - ref)[ok]
+            ww = w[ok]
+            hts, ww = hts[hts > 0], ww[hts > 0]
+            if not len(ww):
+                continue
+            pick = histogram.subsample(len(ww))
+            subsampled |= len(pick) < len(ww)
+            self._d_artists.append(dx.scatter(hts[pick], ww[pick], s=4, alpha=0.4, color=color,
+                                              marker="x" if r.dashed else "o", linewidths=0.6))
+        if self._c_artists:
+            cx.set_xscale("log"); cx.set_yscale("log")
+        if self._d_artists:
+            dx.set_xscale("log"); dx.set_yscale("log")
+        name = "FWHM" if self.width_mode == "fwhm" else "time above threshold"
+        steps = sorted(d for d in dts if d is not None)
+        res = "; ".join(([f"1 sample = {', '.join(f'{d:g}' for d in steps)} µs"] if steps else [])
+                        + (["non-uniform sampling"] if None in dts else [])) or "no widths"
+        label = f"{name} (µs) · {res}"
+        med = getattr(self.app, "_median_applied", 0)
+        if med:
+            label += f" · median-filtered ({med}-pt): pulses widened"
+        cx.set_title("C. Spike widths", loc="left", fontsize=10)
+        cx.set_xlabel(label)
+        cx.set_ylabel("spikes per s per µs")
+        if subsampled:
+            self._d_note = f" · up to {histogram.D_MAX_POINTS:,} per row shown"
+        dx.set_title("D. Width vs height" + self._d_note, loc="left", fontsize=10)
+        dx.set_xlabel(f"spike peak − {ref:.2f} mV")
+        dx.set_ylabel(f"{name} (µs)")
 
     # ---------- table interaction ----------
     def _selected_ids(self):
@@ -737,7 +856,8 @@ class HistogramWindow(tk.Toplevel):
     # ---------- export ----------
     def _export_tail(self):
         lines = [[s] for s in self.summary_lines()]
-        lines += [[], ["Threshold (mV)", self.threshold], ["Reference (mV)", self.reference]]
+        lines += [[], ["Threshold (mV)", self.threshold], ["Reference (mV)", self.reference],
+                  ["Width", WIDTH_MODES[self.width_mode]]]
         for r in self._sorted_rows():
             lines.append(["File", r.trace["path"], "Gain source", self._gain(r)[1] or "none"])
         return lines

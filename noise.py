@@ -181,6 +181,10 @@ class SpikeResult:
     times: np.ndarray    # time of each spike's highest sample (every spike, uncapped)
     heights: np.ndarray  # that sample minus baseline (mV)
     duration: float      # window duration (s) the rate is relative to
+    peak_idx: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=np.int64))  # sample index of each peak
+    width_above: np.ndarray = field(default_factory=lambda: np.empty(0))  # time above threshold (s), gaps excluded
+    fwhm: np.ndarray = field(default_factory=lambda: np.empty(0))  # full width at half max (s), NaN = overlapped;
+    #                                                                filled by the Histogram window, empty otherwise
 
 
 @dataclass
@@ -292,8 +296,21 @@ def find_spikes_at(trace, t0, t1, threshold, dead_time=DEAD_TIME, _base=None):
     gid = np.repeat(np.arange(len(starts)), sizes)
     at_max = np.flatnonzero(val == peak_val[gid])
     first_max = at_max[np.unique(gid[at_max], return_index=True)[1]]
+    width_above = np.add.reduceat(_sample_steps(trace, idx), starts)
     return SpikeResult(baseline, sigma, threshold, t[first_max], val[first_max] - baseline,
-                       duration)
+                       duration, idx[first_max].astype(np.int64), width_above)
+
+
+def _sample_steps(trace, idx):
+    """Time (s) each sample at idx stands for: dt, or the step to the next sample (the trace's last
+    sample takes the step before it) for traces without a uniform sample interval."""
+    if trace.dt is not None:
+        return np.full(len(idx), float(trace.dt))
+    if trace.n < 2:
+        return np.zeros(len(idx))
+    a = np.where(idx + 1 >= trace.n, idx - 1, idx)
+    return (np.asarray(trace.times_at(a + 1), dtype=np.float64)
+            - np.asarray(trace.times_at(a), dtype=np.float64))
 
 
 def analyze(trace, t0, t1, watch_hz, k, f_min):

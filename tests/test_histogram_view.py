@@ -7,6 +7,7 @@ import sys
 import tempfile
 import threading
 import time
+import warnings
 import unittest
 from unittest import mock
 
@@ -19,6 +20,7 @@ import histogram_view  # noqa: E402
 import multi_file_analyzer as m  # noqa: E402
 import noise  # noqa: E402
 import run_info  # noqa: E402
+import spike_width  # noqa: E402
 from matplotlib.backend_bases import MouseEvent  # noqa: E402
 
 FS = 10_000
@@ -192,7 +194,7 @@ class HistogramWindowTest(HistBase):
         self.assertEqual(sum(r.plot for r in w.rows), 12)
         off = next(r for r in w.rows if not r.plot)
         self.assertFalse(w.set_row_plot(off.id, True))
-        self.assertEqual(w.plotted_count(), (12, 12))
+        self.assertEqual(w.plotted_count()[:2], (12, 12))
 
     def test_threshold_below_reference_message(self):
         w = self.open()
@@ -212,7 +214,7 @@ class HistogramWindowTest(HistBase):
         self.wait(lambda: not w.busy)
         df = w.table()
         self.assertEqual(df[df["Run"] == 1].iloc[0]["Spikes"], "No samples in the window")
-        self.assertEqual(w.plotted_count(), (2, 2))
+        self.assertEqual(w.plotted_count()[:2], (2, 2))
         self.assertNotEqual(df[df["Run"] == 2].iloc[0]["Spikes"], "No samples in the window")
 
     def test_remove_trace_while_computing(self):
@@ -427,9 +429,12 @@ class FollowTest(HistBase):
             time.sleep(0.01)
 
     def zoom(self, w, lo, hi):
+        """Zoom the main chart and wait until the window has followed: the main chart's redraw
+        (60 ms debounce) and the follow push (FOLLOW_DELAY_MS) have both fired and the window's
+        recompute is done. A fixed sleep raced these timers whenever a redraw was slow."""
         self.app.tools.zoom_x(lo, hi)
-        self.pump()
-        self.wait(lambda: not w.busy)
+        self.app.update()
+        self.wait(lambda: self.app._xlim_job is None and self.app._follow_job is None and not w.busy)
 
     def test_follow_on_by_default_rows_take_view(self):
         w = self.open()
@@ -540,6 +545,111 @@ class FollowTest(HistBase):
         for k in range(12):
             self.zoom(w, 0.1 * k, 0.1 * k + 1.5)
         self.assertLessEqual(len(w._level_cache), max(histogram_view.LEVEL_CACHE_MIN, 2 * len(w.rows)))
+
+
+class WidthViewTests(HistBase):
+    def test_default_mode_and_columns(self):
+        w = self.open()
+        self.assertEqual(w.width_mode, "above")
+        df = w.table()
+        for c in ("Median width (µs)", "Width IQR (µs)", "FWHM overlapped"):
+            self.assertIn(c, df.columns)
+        # 2-sample pulses, both samples above the threshold, at 10 kHz -> 200 us
+        neg = df[df["Run"] == 1].iloc[0]
+        self.assertAlmostEqual(float(neg["Median width (µs)"]), 200.0)
+        self.assertEqual(self.errors, [])
+
+    def test_fwhm_against_robust_baseline(self):
+        w = self.open()
+        r = self.row_of(w, 1)
+        data = r.trace["data"]
+        i0, i1 = data.index_range(r.t_from, r.t_to)
+        base = w._base[r.id]["baseline"]
+        sp = w._spk[r.id]
+        np.testing.assert_allclose(sp.fwhm, spike_width.fwhm(data, sp.peak_idx, base, i0, i1))
+
+    def test_four_plots_drawn(self):
+        w = self.open()
+        self.assertEqual(w.plotted_count(), (3, 3, 3, 3))
+
+    def test_switch_mode_does_not_recompute(self):
+        w = self.open()
+        with mock.patch.object(w, "_start") as st:
+            w.set_width_mode("fwhm")
+            st.assert_not_called()
+        self.assertEqual(w.width_mode, "fwhm")
+        o, n = w.fwhm_overlap()
+        self.assertGreater(n, 0)
+        self.assertTrue(any("overlapped" in s for s in w.summary_lines()))
+        self.assertIn("FWHM", w.ax_c.get_xlabel())
+
+    def test_switch_mode_during_recompute_shows_no_stale_fwhm(self):
+        w = self.open()
+        w.set_threshold(w.threshold + 20)
+        w.set_width_mode("fwhm")
+        self.wait(lambda: not w.busy)
+        for r in w.rows:
+            sp = w._spk[r.id]
+            self.assertEqual(len(sp.fwhm), len(sp.times))
+            self.assertEqual(sp.threshold, w.threshold)
+        self.assertEqual(self.errors, [])
+
+    def test_row_without_spikes(self):
+        w = self.open()
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", RuntimeWarning)
+            w.set_threshold(10_000.0)
+            self.wait(lambda: not w.busy)
+            w.set_width_mode("fwhm")
+        df = w.table()
+        self.assertTrue((df["Median width (µs)"] == histogram_view.DASH).all())
+        self.assertEqual(w.plotted_count()[2:], (0, 0))
+        self.assertEqual(self.errors, [])
+
+    def test_d_subsample_note(self):
+        with mock.patch.object(histogram, "D_MAX_POINTS", 10):
+            w = self.open()
+            self.assertIn("per row shown", w.d_note())
+        w.set_width_mode("above")
+
+    def test_d_no_note_when_all_drawn(self):
+        w = self.open()
+        self.assertEqual(w.d_note(), "")
+
+    def test_export_has_width_columns_and_mode(self):
+        w = self.open()
+        out = os.path.join(self.tmp.name, "hist.csv")
+        w.export(out)
+        with open(out, encoding="utf-8") as f:
+            text = f.read()
+        head = text.splitlines()[0]
+        for c in ("Median width (µs)", "Width IQR (µs)", "FWHM overlapped"):
+            self.assertIn(c, head)
+        self.assertIn("Width,Time above threshold", text)
+
+    def test_mixed_rates_each_row_binned_on_its_own_samples(self):
+        p = os.path.join(self.tmp.name, "run_009.csv")
+        with mock.patch(__name__ + ".FS", 5_000):          # 200 us samples (the CSV keeps 4 decimals)
+            write_run(p, 9, [(0, 4, 300)], seed=9)
+        self.app.load_paths([p])
+        self.wait(lambda: not self.app._loading)
+        w = self.open()
+        self.assertEqual(len(w.plotted_count()), 4)
+        for r, art in w.c_lines():
+            dt = r.trace["data"].dt * 1e6
+            k = art.get_data().edges / dt - 0.5
+            np.testing.assert_allclose(k, np.round(k), atol=1e-6)
+        label = w.ax_c.get_xlabel()
+        self.assertIn("1 sample = 100, 200 µs", label)
+        self.assertEqual(len(w.c_lines()), 4)
+
+    def test_median_note(self):
+        w = self.open()
+        self.app._median_applied = 3
+        w.set_width_mode("above")
+        self.assertIn("median-filtered (3-pt)", w.ax_c.get_xlabel())
+        self.assertIn("1 sample = 100 µs", w.ax_c.get_xlabel())
+        self.app._median_applied = 0
 
 
 if __name__ == "__main__":
