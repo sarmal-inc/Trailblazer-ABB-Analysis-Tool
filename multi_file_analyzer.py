@@ -58,6 +58,17 @@ Noise analysis:
     parameters; they are saved in
     %LOCALAPPDATA%\\BBAnalyzer\\settings.json and restored at the next start.
 
+Spike widths (Histogram window):
+    Plots C and D show how wide each spike is. "Width" in the top bar picks the measure:
+    Time above threshold (samples above the threshold x sample interval; every spike) or FWHM
+    (full width at half the spike's height above the row's baseline; independent of the
+    threshold). C is the histogram of widths (spikes per s per µs), D plots each spike's width
+    against its peak height (up to 5,000 points per row). The table adds Median width and Width
+    IQR (25th-75th percentile) in µs and "FWHM overlapped": spikes whose signal does not drop to
+    half height before the next spike (or within 200 µs) get no FWHM and are left out of C, D
+    and the width columns in FWHM mode. A width is never finer than one sample (shown on C:
+    1 sample = 100 µs at 10 kHz), and the Median filter widens pulses (noted on C when on).
+
 Chart tools:
     The toolbar under the plots switches the mouse mode: Select window (W), Zoom ↔ (X),
     Zoom ↕ (Y) and Cursors (C). Back (BackSpace) returns to the previous view, Reset zoom

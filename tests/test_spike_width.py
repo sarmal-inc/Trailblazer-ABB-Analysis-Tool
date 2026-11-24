@@ -3,6 +3,7 @@ Run: python -m unittest tests.test_spike_width -v"""
 import os
 import sys
 import unittest
+from unittest import mock
 
 import numpy as np
 
@@ -87,6 +88,22 @@ class FwhmTests(unittest.TestCase):
         np.testing.assert_array_equal(np.isnan(a), np.isnan(b))
         np.testing.assert_allclose(a[np.isfinite(a)], b[np.isfinite(b)])
         self.assertTrue(np.isfinite(a).all())
+
+    def test_staged_walk_matches_full_window(self):
+        rng = np.random.default_rng(2)
+        v = rng.normal(0, 1, 60000)
+        peaks = np.arange(200, 59800, 300)
+        tails = rng.integers(1, 160, len(peaks))        # 2 us .. 320 us above half-max on the right
+        for p, k in zip(peaks, tails):
+            v[p - 2:p + 1] = [5, 40, 100]
+            v[p + 1:p + 1 + k] = 60
+        tr = _trace(v)
+        staged = _fwhm(tr, peaks)
+        with mock.patch.object(spike_width, "FIRST_STAGES", ()):
+            full = _fwhm(tr, peaks)
+        np.testing.assert_array_equal(np.isnan(staged), np.isnan(full))
+        np.testing.assert_allclose(staged[np.isfinite(staged)], full[np.isfinite(full)])
+        self.assertTrue(np.isnan(full).any() and np.isfinite(full).any())
 
     def test_empty(self):
         self.assertEqual(len(_fwhm(_trace(_flat()), [])), 0)

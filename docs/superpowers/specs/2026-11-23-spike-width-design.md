@@ -105,3 +105,14 @@ Adding widths should add no more than ~25 % to the Histogram window's time to co
   screen (the table must stay visible).
 - Whether D's x axis uses the same reference-relative heights as B (preferred, for consistency).
 - Field names in `SpikeResult`.
+
+## Results (2026-11-23)
+| Item | Target | Measured | Verdict |
+|---|---|---|---|
+| FWHM time, Test 008 run_001 (500 kHz, 7.4 M samples, noise; threshold baseline + 2.5σ, 2,441 spikes) | ≤ 25 % of the row's baseline + spike time | 0.001 s (3 %) | pass |
+| FWHM time, Test 008 run_001 at baseline + 1.5σ (33,334 spikes, stress case) | — | 0.039 s (50 % of a 0.08 s row) | noted |
+| FWHM time, Test 015 run_007 (10 kHz luciferase positive, 82,113 spikes) | ≤ 0.1 s per row | 0.023–0.047 s (2–4× the 0.01 s spike detection) | pass on absolute time; the 25 % share is missed because detection on 10 kHz data is so fast |
+| Widths, Test 015 run_007 | — | median time above threshold 100 µs, median FWHM 100 µs, 60 of 82,113 overlapped | 10 kHz cannot resolve the pulse width: most pulses are one sample wide |
+| Widths, Test 008 run_001 (noise, 500 kHz) | — | median time above threshold 2 µs, median FWHM 3.6 µs, 39 of 2,441 overlapped | noise spikes are 1–2 samples wide |
+
+The FWHM search widens in stages (8, 32 samples, then 200 µs), which cut the 500 kHz stress case from 0.148 s to 0.039 s with identical results (tested).
