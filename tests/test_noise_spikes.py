@@ -227,5 +227,35 @@ class GroupingTests(unittest.TestCase):
         self.assertEqual(len(a.times), 3)
 
 
+class SpikeWidthFieldTests(unittest.TestCase):
+    def test_peak_idx_and_width_above(self):
+        tr = _trace(4096 * 4, spikes=[(1000, 80.0), (9000, 120.0)], hold=3)
+        sp = noise.find_spikes_at(tr, 0, tr.t_end, BASE + 40)
+        np.testing.assert_array_equal(sp.peak_idx, [1000, 9000])
+        np.testing.assert_allclose(sp.width_above, [3 * DT, 3 * DT])
+        self.assertEqual(len(sp.fwhm), 0)
+
+    def test_gap_inside_joined_spike_not_counted(self):
+        # two 2-sample bursts 10 samples apart (20 us < 50 us join gap): one spike, 4 samples above
+        tr = _trace(4096 * 2, spikes=[(2000, 90.0), (2010, 100.0)], hold=2)
+        sp = noise.find_spikes_at(tr, 0, tr.t_end, BASE + 40)
+        self.assertEqual(len(sp.times), 1)
+        np.testing.assert_allclose(sp.width_above, [4 * DT])
+
+    def test_non_uniform_time(self):
+        n = 4096 * 2
+        t = np.round(np.cumsum(np.where(np.arange(n) % 2, 2e-6, 3e-6)), 6)
+        tr = _trace(n, spikes=[(3000, 90.0)], hold=2, t=t)
+        self.assertIsNone(tr.dt)
+        sp = noise.find_spikes_at(tr, 0, tr.t_end, BASE + 40)
+        steps = np.diff(t)
+        np.testing.assert_allclose(sp.width_above, [steps[3000] + steps[3001]], rtol=1e-6)
+
+    def test_empty_result_has_empty_arrays(self):
+        tr = _trace(4096)
+        sp = noise.find_spikes_at(tr, 0, tr.t_end, BASE + 1000)
+        self.assertEqual((len(sp.peak_idx), len(sp.width_above)), (0, 0))
+
+
 if __name__ == "__main__":
     unittest.main()
